@@ -67,13 +67,6 @@ Tray menu: **Hint now**, **Settings…**, **Start at login** (toggle), **Open co
 
 Advanced users can edit `%APPDATA%\keynav\config.toml`. See [config.example.toml](config.example.toml).
 
-## Architecture
-
-```
-Global hotkey → UIA scan (foreground window) → hint assignment → layered overlay
-     → keyboard hook (type hint) → InvokePattern / click fallback
-```
-
 Settings and hint engine share the main-thread message loop — config apply is synchronous.
 
 ## Known limitations

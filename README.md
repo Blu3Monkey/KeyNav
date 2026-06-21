@@ -1,4 +1,4 @@
-# KeyNav
+# KeyNav 
 
 Vimium-style keyboard hint navigation for Windows. Press a global hotkey, type letter hints overlaid on UI controls, and activate them without touching the mouse.
 
@@ -8,6 +8,8 @@ Vimium-style keyboard hint navigation for Windows. Press a global hotkey, type l
 2. Focus any window and press **Ctrl+Shift+Space** (default).
 3. Letter badges appear on actionable controls (via UI Automation).
 4. Type a hint to invoke the control. **Esc** cancels. **Backspace** narrows.
+
+   https://github.com/user-attachments/assets/51f6345d-69c7-4ed6-8db9-3fda0d414e69
 
 ## Quick start (from source)
 

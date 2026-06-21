@@ -37,6 +37,7 @@ Run `dist\KeyNav-Setup.exe`. The installer can add a **Start at login** entry un
 ### Manual / development
 
 ```powershell
+cd KeyNav
 cargo build --release
 .\target\release\keynav.exe
 ```

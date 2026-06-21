@@ -1,0 +1,20 @@
+# Rust
+/target/
+
+# Release output (built by scripts/build-release.ps1)
+/dist/
+
+# Logs and local debug output
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# User config (created at runtime in %APPDATA%\keynav\)
+config.toml

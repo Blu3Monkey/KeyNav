@@ -1,0 +1,15 @@
+# KeyNav configuration
+# Saved to %APPDATA%\keynav\config.toml on first run.
+# Prefer editing via tray → Settings…
+
+# Hotkey modifiers (bit flags): ALT=0x1, CONTROL=0x2, SHIFT=0x4, WIN=0x8
+hint_hotkey_modifiers = 6
+hint_hotkey_vk = 32
+
+# Hint letter alphabet (order matters; unique a-z, min 8 chars)
+hint_alphabet = "qwertasdfgzxcvb"
+
+font_size = 14
+badge_bg_color = 13408768
+badge_text_color = 16777215
+max_elements = 500

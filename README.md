@@ -67,7 +67,6 @@ Tray menu: **Hint now**, **Settings…**, **Start at login** (toggle), **Open co
 
 Advanced users can edit `%APPDATA%\keynav\config.toml`. See [config.example.toml](config.example.toml).
 
-Settings and hint engine share the main-thread message loop — config apply is synchronous.
 
 ## Known limitations
 
@@ -80,5 +79,4 @@ Settings and hint engine share the main-thread message loop — config apply is 
 | UWP / some modern apps | Mixed; click fallback may help |
 
 ## License
-
 MIT

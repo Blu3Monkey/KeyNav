@@ -4,10 +4,10 @@ use anyhow::{Context, Result};
 use std::sync::Mutex;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, TRUE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    GetTextExtentPoint32W, InvalidateRect, SelectObject, SetBkMode, SetTextColor, TextOutW,
+    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
+    GetTextExtentPoint32W, InvalidateRect, LineTo, MoveToEx, SelectObject, SetBkMode, SetTextColor, TextOutW,
     UpdateWindow, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    FF_DONTCARE, FW_BOLD, HDC, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    FF_DONTCARE, FW_BOLD, HDC, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, RegisterClassW,
@@ -28,6 +28,7 @@ struct RenderBadge {
     x: i32,
     y: i32,
     label: String,
+    visible: bool,
 }
 
 struct RenderData {
@@ -115,11 +116,11 @@ impl OverlayWindow {
     pub fn show_hints(&self, targets: &[HintTarget], prefix: &str) -> Result<()> {
         let badges: Vec<RenderBadge> = targets
             .iter()
-            .filter(|t| prefix.is_empty() || t.label.starts_with(prefix))
             .map(|t| RenderBadge {
                 x: t.element.rect.left,
                 y: t.element.rect.top,
                 label: t.label.clone(),
+                visible: t.label.starts_with(prefix),
             })
             .collect();
 
@@ -206,6 +207,10 @@ unsafe fn paint(hwnd: HWND, hdc: HDC) {
     SetBkMode(hdc, TRANSPARENT);
 
     let bg_brush = CreateSolidBrush(COLORREF(data.bg));
+    let leader_pen = CreatePen(PS_SOLID, 1, COLORREF(data.bg));
+    let old_pen = SelectObject(hdc, leader_pen);
+    let mut occupied = Vec::with_capacity(data.badges.len());
+    let mut visible = Vec::new();
     for badge in &data.badges {
         let wide: Vec<u16> = badge.label.encode_utf16().collect();
         let mut sz = SIZE::default();
@@ -213,19 +218,86 @@ unsafe fn paint(hwnd: HWND, hdc: HDC) {
 
         let x = badge.x - data.origin_x;
         let y = badge.y - data.origin_y;
-        let rect = RECT {
-            left: x,
-            top: y,
-            right: x + sz.cx + BADGE_PAD * 2,
-            bottom: y + sz.cy + BADGE_PAD * 2,
-        };
-        FillRect(hdc, &rect, bg_brush);
-        SetTextColor(hdc, COLORREF(data.fg));
-        let _ = TextOutW(hdc, x + BADGE_PAD, y + BADGE_PAD, &wide);
+        let rect = place_badge(
+            (x, y),
+            (sz.cx + BADGE_PAD * 2, sz.cy + BADGE_PAD * 2),
+            &client,
+            &occupied,
+        );
+        occupied.push(rect);
+        if badge.visible {
+            visible.push((x, y, rect, wide));
+        }
     }
+
+    for (x, y, rect, _) in &visible {
+        if *x != rect.left || *y != rect.top {
+            let _ = MoveToEx(hdc, *x, *y, None);
+            let _ = LineTo(hdc, (*x).clamp(rect.left, rect.right), (*y).clamp(rect.top, rect.bottom));
+        }
+    }
+    SetTextColor(hdc, COLORREF(data.fg));
+    for (_, _, rect, wide) in visible {
+        FillRect(hdc, &rect, bg_brush);
+        let _ = TextOutW(hdc, rect.left + BADGE_PAD, rect.top + BADGE_PAD, &wide);
+    }
+    SelectObject(hdc, old_pen);
+    let _ = DeleteObject(leader_pen);
     let _ = DeleteObject(bg_brush);
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);
+}
+
+fn place_badge(anchor: (i32, i32), size: (i32, i32), bounds: &RECT, occupied: &[RECT]) -> RECT {
+    let (x, y) = anchor;
+    let (width, height) = size;
+    let at = |dx, dy| {
+        let left = (x + dx).clamp(bounds.left, (bounds.right - width).max(bounds.left));
+        let top = (y + dy).clamp(bounds.top, (bounds.bottom - height).max(bounds.top));
+        RECT { left, top, right: left + width, bottom: top + height }
+    };
+    let free = |rect: &RECT| {
+        !occupied.iter().any(|other| {
+            rect.left < other.right && rect.right > other.left
+                && rect.top < other.bottom && rect.bottom > other.top
+        })
+    };
+
+    let preferred = at(0, 0);
+    if free(&preferred) {
+        return preferred;
+    }
+
+    // Prefer nearby positions, with enough space for a visible gap.
+    for distance in 1..=4 {
+        let dx = distance * (width + 2);
+        let dy = distance * (height + 2);
+        for (x_offset, y_offset) in [(dx, 0), (0, dy), (-dx, 0), (0, -dy),
+            (dx, dy), (-dx, dy), (dx, -dy), (-dx, -dy)] {
+            let candidate = at(x_offset, y_offset);
+            if free(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    // Keep extreme clusters close to their controls.
+    preferred
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_anchors_move_badges_apart_and_keep_them_on_screen() {
+        let bounds = RECT { left: 0, top: 0, right: 100, bottom: 100 };
+        let first = place_badge((95, 0), (20, 14), &bounds, &[]);
+        let second = place_badge((95, 0), (20, 14), &bounds, &[first]);
+        assert_eq!(first.right, bounds.right);
+        assert!(second.left >= bounds.left && second.bottom <= bounds.bottom);
+        assert!(second.right <= first.left || second.top >= first.bottom);
+    }
 }
 
 unsafe extern "system" fn overlay_wnd_proc(

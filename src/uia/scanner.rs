@@ -5,7 +5,10 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 use windows::Win32::UI::Accessibility::{
     IUIAutomation, IUIAutomationElement, CUIAutomation, TreeScope_Descendants,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetSystemMetrics, GetWindowRect, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+};
 
 thread_local! {
     static AUTOMATION: RefCell<Option<IUIAutomation>> = const { RefCell::new(None) };
@@ -20,6 +23,16 @@ pub struct ScreenRect {
 }
 
 impl ScreenRect {
+    fn intersection(&self, other: &Self) -> Option<Self> {
+        let rect = Self {
+            left: self.left.max(other.left),
+            top: self.top.max(other.top),
+            right: self.right.min(other.right),
+            bottom: self.bottom.min(other.bottom),
+        };
+        (rect.width() > 0 && rect.height() > 0).then_some(rect)
+    }
+
     pub fn width(&self) -> i32 {
         self.right - self.left
     }
@@ -41,6 +54,12 @@ impl ScreenRect {
             && self.top <= other.top
             && self.right >= other.right
             && self.bottom >= other.bottom
+    }
+}
+
+impl From<RECT> for ScreenRect {
+    fn from(rect: RECT) -> Self {
+        Self { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
     }
 }
 
@@ -81,6 +100,22 @@ pub fn scan_foreground_window(max_elements: usize) -> Result<Vec<ScannedElement>
         return Ok(Vec::new());
     }
 
+    let mut window = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut window) }.context("GetWindowRect")?;
+    let screen = unsafe {
+        let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        ScreenRect {
+            left,
+            top,
+            right: left + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        }
+    };
+    let Some(bounds) = ScreenRect::from(window).intersection(&screen) else {
+        return Ok(Vec::new());
+    };
+
     let automation = automation()?;
     let root = unsafe {
         automation
@@ -111,7 +146,7 @@ pub fn scan_foreground_window(max_elements: usize) -> Result<Vec<ScannedElement>
             Ok(e) => e,
             Err(_) => continue,
         };
-        if let Some(scanned) = try_element(&el, hwnd)? {
+        if let Some(scanned) = try_element(&el, hwnd, &bounds) {
             candidates.push(scanned);
         }
     }
@@ -129,39 +164,31 @@ pub fn scan_foreground_window(max_elements: usize) -> Result<Vec<ScannedElement>
     Ok(candidates)
 }
 
-fn try_element(element: &IUIAutomationElement, target_hwnd: HWND) -> Result<Option<ScannedElement>> {
-    if !is_enabled(element) {
-        return Ok(None);
+fn try_element(
+    element: &IUIAutomationElement,
+    target_hwnd: HWND,
+    bounds: &ScreenRect,
+) -> Option<ScannedElement> {
+    if !is_enabled(element) || is_offscreen(element) {
+        return None;
     }
 
-    if !is_actionable(element) {
-        return Ok(None);
-    }
-
-    let rect = element_rect(element, target_hwnd)?;
+    let reported = unsafe { element.CurrentBoundingRectangle() }.ok()?;
+    let rect = ScreenRect::from(reported).intersection(bounds)?;
     if rect.width() < MIN_DIMENSION || rect.height() < MIN_DIMENSION || rect.area() < MIN_AREA {
-        return Ok(None);
+        return None;
+    }
+    if !is_actionable(element) {
+        return None;
     }
 
-    // Skip elements clearly off-screen (but don't trust IsOffscreen alone — many
-    // apps report visible controls as offscreen).
-    if is_offscreen(element) && !rect_on_screen(&rect) {
-        return Ok(None);
-    }
-
-    let name = get_name(element).unwrap_or_default();
-    let control_type = get_control_type(element);
-    Ok(Some(ScannedElement {
-        name,
-        control_type,
+    Some(ScannedElement {
+        name: get_name(element).unwrap_or_default(),
+        control_type: get_control_type(element),
         rect,
         element: element.clone(),
         target_hwnd,
-    }))
-}
-
-fn rect_on_screen(rect: &ScreenRect) -> bool {
-    rect.width() > 0 && rect.height() > 0 && rect.right > 0 && rect.bottom > 0
+    })
 }
 
 fn is_enabled(element: &IUIAutomationElement) -> bool {
@@ -216,7 +243,9 @@ fn has_invoke_pattern(element: &IUIAutomationElement) -> bool {
                 .is_ok()
             || element
                 .GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId)
-                .is_ok()
+                .ok()
+                .and_then(|pattern| pattern.CurrentDefaultAction().ok())
+                .is_some_and(|action| !action.is_empty())
     }
 }
 
@@ -233,34 +262,19 @@ fn is_actionable(element: &IUIAutomationElement) -> bool {
     }
 }
 
-fn element_rect(element: &IUIAutomationElement, hwnd: HWND) -> Result<ScreenRect> {
-    let rect = unsafe { element.CurrentBoundingRectangle() }.context("bounding rect")?;
-    let mut screen_rect = ScreenRect {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-    };
-
-    if screen_rect.width() <= 0 || screen_rect.height() <= 0 {
-        let mut wr = RECT::default();
-        unsafe { GetWindowRect(hwnd, &mut wr) }.ok();
-        screen_rect = ScreenRect {
-            left: wr.left,
-            top: wr.top,
-            right: wr.right,
-            bottom: wr.bottom,
-        };
-    }
-
-    Ok(screen_rect)
-}
-
 fn deduplicate(elements: &mut Vec<ScannedElement>) {
     let mut keep = vec![true; elements.len()];
     for i in 0..elements.len() {
         for j in 0..elements.len() {
             if i == j || !keep[i] || !keep[j] {
+                continue;
+            }
+            if elements[i].name == elements[j].name
+                && elements[i].control_type == elements[j].control_type
+                && elements[i].rect.contains(&elements[j].rect)
+                && elements[j].rect.contains(&elements[i].rect)
+            {
+                keep[j] = false;
                 continue;
             }
             if elements[i].rect.contains(&elements[j].rect) && elements[j].rect.area() < elements[i].rect.area()

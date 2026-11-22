@@ -280,3 +280,45 @@ fn deduplicate(elements: &mut Vec<ScannedElement>) {
         .collect();
     *elements = filtered;
 }
+
+
+/// Capture provider properties separately from scanning so diagnostics cannot filter targets.
+pub fn write_hint_diagnostics(
+    path: &std::path::Path,
+    targets: &[crate::hints::HintTarget],
+) -> Result<()> {
+    use std::io::{BufWriter, Write};
+
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut output = BufWriter::new(file);
+    writeln!(output, "\n--- scan {:?}: {} hints ---", std::time::SystemTime::now(), targets.len())?;
+    let walker = unsafe { automation()?.RawViewWalker() }?;
+    for target in targets {
+        let scanned = &target.element;
+        writeln!(
+            output,
+            "hint={} name={:?} type={} hint_bounds={:?}",
+            target.label, scanned.name, scanned.control_type, scanned.rect
+        )?;
+        let mut current = Some(scanned.element.clone());
+        for depth in 0..=3 {
+            let Some(element) = current else { break };
+            unsafe {
+                writeln!(
+                    output,
+                    "  depth={depth} name={:?} type={:?} offscreen={:?} enabled={:?} bounds={:?} class={:?} framework={:?}",
+                    element.CurrentName().map(|name| name.to_string()),
+                    element.CurrentControlType().map(|kind| kind.0),
+                    element.CurrentIsOffscreen().map(|flag| flag.as_bool()),
+                    element.CurrentIsEnabled().map(|flag| flag.as_bool()),
+                    element.CurrentBoundingRectangle(),
+                    element.CurrentClassName().map(|name| name.to_string()),
+                    element.CurrentFrameworkId().map(|name| name.to_string())
+                )?;
+                current = if depth < 3 { walker.GetParentElement(&element).ok() } else { None };
+            }
+        }
+    }
+    output.flush()?;
+    Ok(())
+}

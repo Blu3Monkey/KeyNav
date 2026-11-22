@@ -58,6 +58,7 @@ enum AppState {
 pub(crate) struct AppContext {
     state: AppState,
     config: Config,
+    diagnose_hints: bool,
     targets: Vec<hints::HintTarget>,
     matcher: HintMatcher,
     click_button: Option<ClickButton>,
@@ -94,6 +95,7 @@ fn main() -> Result<()> {
     let mut ctx = AppContext {
         state: AppState::Idle,
         config: config.clone(),
+        diagnose_hints: env::args().any(|arg| arg == "--diagnose-hints"),
         targets: Vec::new(),
         matcher: HintMatcher::new(),
         click_button: None,
@@ -236,6 +238,12 @@ fn start_hint_mode(ctx: &mut AppContext) {
     };
 
     ctx.targets = assign_hints(elements, &alphabet);
+    if ctx.diagnose_hints {
+        let path = Config::config_path().with_file_name("hint-diagnostics.log");
+        if let Err(error) = uia::write_hint_diagnostics(&path, &ctx.targets) {
+            log::warn!("could not record hint diagnostics: {error:#}");
+        }
+    }
     ctx.matcher.clear();
     ctx.state = AppState::HintMode;
 

@@ -1,4 +1,4 @@
-use crate::config::{validate_alphabet_str, Config, DEFAULT_ALPHABET};
+use crate::config::{parse_hint_key, validate_alphabet_str, vk_display_name, Config, DEFAULT_ALPHABET};
 use crate::settings::hotkey_ctrl;
 use crate::AppContext;
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetDlgItem, GetWindowLongPtrW, GetWindowTextLengthW,
     GetWindowTextW, IsWindow, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, BM_GETCHECK, BM_SETCHECK, ES_AUTOHSCROLL, GWLP_USERDATA, HMENU, SW_SHOW,
+    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, ES_AUTOHSCROLL, GWLP_USERDATA, HMENU, SW_SHOW,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL,
     WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
     WS_VSCROLL,
@@ -39,6 +39,10 @@ const IDC_FONT_LABEL: i32 = 1021;
 const IDC_MAX_ELEMENTS: i32 = 1022;
 const IDC_BG_COLOR: i32 = 1023;
 const IDC_TEXT_COLOR: i32 = 1024;
+const IDC_RIGHT_BG_COLOR: i32 = 1025;
+const IDC_RIGHT_TEXT_COLOR: i32 = 1026;
+const IDC_HINT_KEYS: [i32; 5] = [1040, 1041, 1042, 1043, 1044];
+const IDC_RESET_KEYS: i32 = 1045;
 const IDC_ERROR: i32 = 1030;
 const IDC_SAVE: i32 = 1;
 const IDC_CANCEL: i32 = 2;
@@ -47,8 +51,6 @@ static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
 
 struct DialogState {
     draft: Config,
-    bg_color: COLORREF,
-    text_color: COLORREF,
     ctx: *mut AppContext,
 }
 
@@ -76,8 +78,6 @@ pub fn open(ctx: &mut AppContext) -> Result<()> {
 
         let state = Box::new(DialogState {
             draft: ctx.config.clone(),
-            bg_color: COLORREF(ctx.config.badge_bg_color),
-            text_color: COLORREF(ctx.config.badge_text_color),
             ctx: ctx as *mut AppContext,
         });
 
@@ -89,7 +89,7 @@ pub fn open(ctx: &mut AppContext) -> Result<()> {
             100,
             100,
             480,
-            520,
+            590,
             None,
             None,
             instance,
@@ -181,8 +181,29 @@ unsafe fn create_child_controls(parent: HWND, instance: HMODULE) -> Result<()> {
         instance,
         None,
     );
-    btn(w!("Win"), IDC_CHK_WIN, 220, y, 60);
+    CreateWindowExW(
+        WINDOW_EX_STYLE(0), w!("BUTTON"), w!("Win"),
+        WINDOW_STYLE((WS_CHILD | WS_VISIBLE | WS_TABSTOP).0 | BS_AUTOCHECKBOX as u32),
+        220, y, 60, 24, parent, HMENU(IDC_CHK_WIN as isize as *mut _), instance, None,
+    )?;
     y += 36;
+
+    for (index, (id, title)) in IDC_HINT_KEYS.into_iter().zip([
+        w!("Switch mode"), w!("Left click"), w!("Right click"), w!("Cancel hints"), w!("Erase letter"),
+    ]).enumerate() {
+        let x = 12 + index as i32 * 88;
+        let _ = CreateWindowExW(
+            WINDOW_EX_STYLE(0), w!("STATIC"), title, WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0),
+            x, y, 87, 17, parent, None, instance, None,
+        );
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0), w!("EDIT"), w!(""),
+            WINDOW_STYLE((WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER).0 | ES_AUTOHSCROLL as u32),
+            x, y + 19, 82, 24, parent, HMENU(id as isize as *mut _), instance, None,
+        )?;
+    }
+    y += 48;
+    btn(w!("Reset shortcuts"), IDC_RESET_KEYS, 312, y, 137);
 
     label(w!("Hint letters (order matters):"), y);
     y += 18;
@@ -239,8 +260,10 @@ unsafe fn create_child_controls(parent: HWND, instance: HMODULE) -> Result<()> {
     );
     y += 52;
 
-    btn(w!("Badge background…"), IDC_BG_COLOR, 12, y, 140);
-    btn(w!("Badge text…"), IDC_TEXT_COLOR, 160, y, 140);
+    btn(w!("Primary fill…"), IDC_BG_COLOR, 12, y, 103);
+    btn(w!("Primary text…"), IDC_TEXT_COLOR, 122, y, 103);
+    btn(w!("Right-click fill…"), IDC_RIGHT_BG_COLOR, 232, y, 103);
+    btn(w!("Right-click text…"), IDC_RIGHT_TEXT_COLOR, 342, y, 108);
     y += 32;
 
     label(w!("Max elements per scan:"), y);
@@ -301,6 +324,7 @@ unsafe fn create_child_controls(parent: HWND, instance: HMODULE) -> Result<()> {
 unsafe fn load_controls(hwnd: HWND, config: Config) -> Result<()> {
     hotkey_ctrl::set_hotkey(hwnd, IDC_HOTKEY, &config);
     set_check(hwnd, IDC_CHK_WIN, config.hotkey_win());
+    load_hint_keys(hwnd, &config);
     set_text(hwnd, IDC_ALPHABET, &config.hint_alphabet);
     set_text(hwnd, IDC_MAX_ELEMENTS, &config.max_elements.to_string());
 
@@ -322,6 +346,12 @@ unsafe fn load_controls(hwnd: HWND, config: Config) -> Result<()> {
     update_font_label(hwnd);
     set_error(hwnd, "");
     Ok(())
+}
+
+unsafe fn load_hint_keys(hwnd: HWND, config: &Config) {
+    for (id, vk) in IDC_HINT_KEYS.into_iter().zip(config.hint_keys()) {
+        set_text(hwnd, id, &vk_display_name(vk));
+    }
 }
 
 unsafe extern "system" fn settings_wnd_proc(
@@ -354,8 +384,15 @@ unsafe extern "system" fn settings_wnd_proc(
                     IDC_PRESET_RESET => {
                         set_text(hwnd, IDC_ALPHABET, &Config::default().hint_alphabet);
                     }
-                    IDC_BG_COLOR => pick_color(hwnd, true),
-                    IDC_TEXT_COLOR => pick_color(hwnd, false),
+                    IDC_RESET_KEYS => {
+                        let defaults = Config::default();
+                        hotkey_ctrl::set_hotkey(hwnd, IDC_HOTKEY, &defaults);
+                        set_check(hwnd, IDC_CHK_WIN, defaults.hotkey_win());
+                        load_hint_keys(hwnd, &defaults);
+                    }
+                    IDC_BG_COLOR | IDC_TEXT_COLOR | IDC_RIGHT_BG_COLOR | IDC_RIGHT_TEXT_COLOR => {
+                        pick_color(hwnd, id);
+                    }
                     _ => {}
                 }
             }
@@ -397,8 +434,12 @@ unsafe fn on_save(hwnd: HWND) -> Result<()> {
     );
     state.draft.hint_alphabet = get_text(hwnd, IDC_ALPHABET);
     state.draft.font_size = get_slider_pos(hwnd, IDC_FONT_SLIDER).clamp(10, 24);
-    state.draft.badge_bg_color = state.bg_color.0;
-    state.draft.badge_text_color = state.text_color.0;
+    let [switch_mode, left_click, right_click, cancel, erase] = IDC_HINT_KEYS;
+    state.draft.switch_mode_vk = parse_hint_key(&get_text(hwnd, switch_mode)).context("Switch mode")?;
+    state.draft.left_click_vk = parse_hint_key(&get_text(hwnd, left_click)).context("Left click")?;
+    state.draft.right_click_vk = parse_hint_key(&get_text(hwnd, right_click)).context("Right click")?;
+    state.draft.cancel_vk = parse_hint_key(&get_text(hwnd, cancel)).context("Cancel hints")?;
+    state.draft.erase_vk = parse_hint_key(&get_text(hwnd, erase)).context("Erase letter")?;
     state.draft.max_elements = get_text(hwnd, IDC_MAX_ELEMENTS)
         .parse()
         .context("max elements must be a number")?;
@@ -416,31 +457,30 @@ unsafe fn on_save(hwnd: HWND) -> Result<()> {
     Ok(())
 }
 
-unsafe fn pick_color(hwnd: HWND, background: bool) {
+unsafe fn pick_color(hwnd: HWND, id: i32) {
     let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
     if state_ptr.is_null() {
         return;
     }
     let state = &mut *state_ptr;
+    let selected = match id {
+        IDC_BG_COLOR => &mut state.draft.badge_bg_color,
+        IDC_TEXT_COLOR => &mut state.draft.badge_text_color,
+        IDC_RIGHT_BG_COLOR => &mut state.draft.right_badge_bg_color,
+        IDC_RIGHT_TEXT_COLOR => &mut state.draft.right_badge_text_color,
+        _ => return,
+    };
     static mut CUSTOM_COLORS: [COLORREF; 16] = [COLORREF(0); 16];
     let mut cc = CHOOSECOLORW {
         lpCustColors: std::ptr::addr_of_mut!(CUSTOM_COLORS).cast(),
         lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
         hwndOwner: hwnd,
-        rgbResult: if background {
-            state.bg_color
-        } else {
-            state.text_color
-        },
+        rgbResult: COLORREF(*selected),
         Flags: CC_RGBINIT | CC_SOLIDCOLOR,
         ..Default::default()
     };
     if ChooseColorW(&mut cc).as_bool() {
-        if background {
-            state.bg_color = cc.rgbResult;
-        } else {
-            state.text_color = cc.rgbResult;
-        }
+        *selected = cc.rgbResult.0;
     }
 }
 

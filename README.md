@@ -8,7 +8,7 @@ Vimium-style keyboard hint navigation for Windows. Press a global hotkey, type l
 2. Focus any window and press **Ctrl+Shift+Space** (default).
 3. Letter badges appear on actionable controls (via UI Automation).
 4. Type a hint to invoke the control. **Esc** cancels. **Backspace** removes the last typed letter.
-5. For a mouse click, press **1** for left click or **2** for right click before completing the hint. Each new hint session starts in normal activation mode.
+5. Press **Tab** to switch between the default action and right click. The hint colors and mode indicator update immediately. **1** selects an explicit left click and **2** selects right click. Each new hint session starts in normal activation mode.
 
    https://github.com/user-attachments/assets/51f6345d-69c7-4ed6-8db9-3fda0d414e69
 
@@ -54,8 +54,9 @@ Right-click the tray icon and choose **Settings…** (native Win32 dialog on the
 | Section | Options |
 |---------|---------|
 | **Activation hotkey** | HotKey control + Win checkbox |
+| **Hint shortcuts** | Switch mode, left click, right click, cancel hints, erase the last hint letter |
 | **Hint letters** | Custom alphabet, Home row / QWERTY left presets |
-| **Appearance** | Font size slider, badge colors, max elements |
+| **Appearance** | Font size slider, separate primary and right-click badge colors, max elements |
 
 Changes apply when you click **Save**. If `RegisterHotKey` fails (chord taken by another app), settings still save and the keyboard-hook fallback remains active (you'll see a warning).
 

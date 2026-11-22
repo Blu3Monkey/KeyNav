@@ -1,4 +1,5 @@
-use crate::config::Config;
+use crate::config::{vk_display_name, Config};
+use crate::uia::ClickButton;
 use crate::hints::HintTarget;
 use anyhow::{Context, Result};
 use std::sync::Mutex;
@@ -10,7 +11,7 @@ use windows::Win32::Graphics::Gdi::{
     FF_DONTCARE, FW_BOLD, HDC, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect, RegisterClassW,
     SetLayeredWindowAttributes, SetWindowPos, ShowWindow, HWND_TOPMOST, LWA_COLORKEY,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
     SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
@@ -37,6 +38,8 @@ struct RenderData {
     bg: u32,
     fg: u32,
     badges: Vec<RenderBadge>,
+    status: String,
+    status_bounds: RECT,
 }
 
 static RENDER: Mutex<Option<RenderData>> = Mutex::new(None);
@@ -112,7 +115,34 @@ impl OverlayWindow {
         self.config = config.clone();
     }
 
-    pub fn show_hints(&self, targets: &[HintTarget], prefix: &str) -> Result<()> {
+    pub fn show_hints(
+        &self,
+        targets: &[HintTarget],
+        prefix: &str,
+        button: Option<ClickButton>,
+    ) -> Result<()> {
+        let (mode, bg, fg) = match button {
+            Some(ClickButton::Right) => ("Right click", self.config.right_badge_bg_color, self.config.right_badge_text_color),
+            Some(ClickButton::Left) => ("Left click", self.config.badge_bg_color, self.config.badge_text_color),
+            None => ("Default action", self.config.badge_bg_color, self.config.badge_text_color),
+        };
+        let switch_key = vk_display_name(self.config.switch_mode_vk);
+        let status = format!("{mode} · {switch_key} to switch");
+        let mut status_bounds = RECT {
+            left: self.vx,
+            top: self.vy,
+            right: self.vx + self.vw,
+            bottom: self.vy + self.vh,
+        };
+        if let Some(target) = targets.first() {
+            let mut window = RECT::default();
+            if unsafe { GetWindowRect(target.element.target_hwnd, &mut window) }.is_ok() {
+                status_bounds.left = status_bounds.left.max(window.left);
+                status_bounds.top = status_bounds.top.max(window.top);
+                status_bounds.right = status_bounds.right.min(window.right);
+                status_bounds.bottom = status_bounds.bottom.min(window.bottom);
+            }
+        }
         let badges: Vec<RenderBadge> = targets
             .iter()
             .filter(|t| prefix.is_empty() || t.label.starts_with(prefix))
@@ -129,9 +159,11 @@ impl OverlayWindow {
                 origin_x: self.vx,
                 origin_y: self.vy,
                 font_size: self.config.font_size,
-                bg: self.config.badge_bg_color,
-                fg: self.config.badge_text_color,
+                bg: bg.max(1),
+                fg,
                 badges,
+                status,
+                status_bounds,
             });
         }
 
@@ -223,6 +255,21 @@ unsafe fn paint(hwnd: HWND, hdc: HDC) {
         SetTextColor(hdc, COLORREF(data.fg));
         let _ = TextOutW(hdc, x + BADGE_PAD, y + BADGE_PAD, &wide);
     }
+    let status: Vec<u16> = data.status.encode_utf16().collect();
+    let mut size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &status, &mut size);
+    let width = size.cx + BADGE_PAD * 2;
+    let height = size.cy + BADGE_PAD * 2;
+    let bounds = data.status_bounds;
+    let left = ((bounds.left + bounds.right - width) / 2 - data.origin_x)
+        .clamp(0, (client.right - width).max(0));
+    let top = (bounds.bottom - data.origin_y - height - 8)
+        .clamp(0, (client.bottom - height).max(0));
+    let status_rect = RECT { left, top, right: left + width, bottom: top + height };
+    FillRect(hdc, &status_rect, bg_brush);
+    SetTextColor(hdc, COLORREF(data.fg));
+    let _ = TextOutW(hdc, left + BADGE_PAD, top + BADGE_PAD, &status);
+
     let _ = DeleteObject(bg_brush);
     SelectObject(hdc, old_font);
     let _ = DeleteObject(font);

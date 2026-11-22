@@ -251,7 +251,7 @@ unsafe fn paint(hwnd: HWND, hdc: HDC) {
 fn place_badge(anchor: (i32, i32), size: (i32, i32), bounds: &RECT, occupied: &[RECT]) -> RECT {
     let (x, y) = anchor;
     let (width, height) = size;
-    let at = |dx, dy| {
+    let at = |dx: i32, dy: i32| {
         let left = (x + dx).clamp(bounds.left, (bounds.right - width).max(bounds.left));
         let top = (y + dy).clamp(bounds.top, (bounds.bottom - height).max(bounds.top));
         RECT { left, top, right: left + width, bottom: top + height }

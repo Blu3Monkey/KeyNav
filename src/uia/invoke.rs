@@ -6,15 +6,26 @@ use windows::Win32::UI::Accessibility::{
     ExpandCollapseState_Collapsed, ExpandCollapseState_LeafNode,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SetCursorPos, SetForegroundWindow};
 
 use super::scanner::ScannedElement;
 
-pub fn activate_element(element: &ScannedElement) -> Result<()> {
+#[derive(Clone, Copy)]
+pub enum ClickButton {
+    Left,
+    Right,
+}
+
+pub fn activate_element(element: &ScannedElement, click_button: Option<ClickButton>) -> Result<()> {
     unsafe {
         let _ = SetForegroundWindow(element.target_hwnd);
+    }
+
+    if let Some(button) = click_button {
+        return click_center(element, button);
     }
 
     if try_invoke(&element.element).is_ok() {
@@ -33,8 +44,7 @@ pub fn activate_element(element: &ScannedElement) -> Result<()> {
         return Ok(());
     }
 
-    click_center(element)?;
-    Ok(())
+    click_center(element, ClickButton::Left)
 }
 
 fn try_invoke(element: &windows::Win32::UI::Accessibility::IUIAutomationElement) -> Result<()> {
@@ -92,7 +102,11 @@ fn try_focus_value(element: &windows::Win32::UI::Accessibility::IUIAutomationEle
     Ok(())
 }
 
-fn click_center(element: &ScannedElement) -> Result<()> {
+fn click_center(element: &ScannedElement, button: ClickButton) -> Result<()> {
+    let (down_flag, up_flag) = match button {
+        ClickButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        ClickButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+    };
     let (x, y) = element.rect.center();
     unsafe {
         SetCursorPos(x, y).context("SetCursorPos")?;
@@ -100,7 +114,7 @@ fn click_center(element: &ScannedElement) -> Result<()> {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
-                    dwFlags: MOUSEEVENTF_LEFTDOWN,
+                    dwFlags: down_flag,
                     ..Default::default()
                 },
             },
@@ -109,12 +123,17 @@ fn click_center(element: &ScannedElement) -> Result<()> {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
-                    dwFlags: MOUSEEVENTF_LEFTUP,
+                    dwFlags: up_flag,
                     ..Default::default()
                 },
             },
         };
-        SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+        let input_size = std::mem::size_of::<INPUT>() as i32;
+        let sent = SendInput(&[down, up], input_size);
+        if sent == 1 {
+            SendInput(&[up], input_size);
+        }
+        anyhow::ensure!(sent == 2, "SendInput sent {sent} of 2 mouse events");
     }
     Ok(())
 }

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::thread;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
-use uia::{activate_element, scan_foreground_window};
+use uia::{activate_element, scan_foreground_window, ClickButton};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -25,7 +25,7 @@ use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VK_1, VK_2, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE,
@@ -58,6 +58,7 @@ pub(crate) struct AppContext {
     config: Config,
     targets: Vec<hints::HintTarget>,
     matcher: HintMatcher,
+    click_button: Option<ClickButton>,
     overlay: OverlayWindow,
     hook: Option<HHOOK>,
     hotkey: Option<HotkeyRegistration>,
@@ -93,6 +94,7 @@ fn main() -> Result<()> {
         config: config.clone(),
         targets: Vec::new(),
         matcher: HintMatcher::new(),
+        click_button: None,
         overlay,
         hook: None,
         hotkey: register_hotkey(message_hwnd, &config),
@@ -248,6 +250,14 @@ fn handle_key(ctx: &mut AppContext, vk: u32) {
         finish_hint_mode(ctx);
         return;
     }
+    if vk == VK_1.0 as u32 {
+        ctx.click_button = Some(ClickButton::Left);
+        return;
+    }
+    if vk == VK_2.0 as u32 {
+        ctx.click_button = Some(ClickButton::Right);
+        return;
+    }
     if vk == VK_BACK.0 as u32 {
         ctx.matcher.pop_char();
         let _ = ctx.overlay.show_hints(&ctx.targets, ctx.matcher.prefix());
@@ -261,8 +271,9 @@ fn handle_key(ctx: &mut AppContext, vk: u32) {
                 let _ = ctx.overlay.show_hints(&ctx.targets, ctx.matcher.prefix());
             }
             MatchResult::Unique(target) => {
+                let click_button = ctx.click_button;
                 finish_hint_mode(ctx);
-                if let Err(e) = activate_element(&target.element) {
+                if let Err(e) = activate_element(&target.element, click_button) {
                     log::warn!("activate failed: {e:#}");
                 }
             }
@@ -277,6 +288,7 @@ fn finish_hint_mode(ctx: &mut AppContext) {
     ctx.overlay.hide();
     ctx.matcher.clear();
     ctx.targets.clear();
+    ctx.click_button = None;
     ctx.state = AppState::Idle;
     HINT_ACTIVE.store(false, Ordering::SeqCst);
 }
@@ -327,8 +339,11 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     let vk = kb.vkCode;
 
     if HINT_ACTIVE.load(Ordering::SeqCst) {
-        let interesting =
-            vk == VK_ESCAPE.0 as u32 || vk == VK_BACK.0 as u32 || (0x41..=0x5A).contains(&vk);
+        let interesting = vk == VK_ESCAPE.0 as u32
+            || vk == VK_BACK.0 as u32
+            || vk == VK_1.0 as u32
+            || vk == VK_2.0 as u32
+            || (0x41..=0x5A).contains(&vk);
         if interesting {
             post_to_main(WM_KEYNAV_KEY, vk);
             return LRESULT(1);

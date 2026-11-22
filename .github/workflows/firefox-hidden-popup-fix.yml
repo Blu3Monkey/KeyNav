@@ -1,0 +1,18 @@
+name: KeyNav Firefox popup fix
+on:
+  push:
+    branches: [codex/firefox-hidden-popup-fix]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KeyNav-Firefox-popup-fix
+          path: target/release/keynav.exe
+          if-no-files-found: error

@@ -3,7 +3,8 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Accessibility::{
-    IUIAutomation, IUIAutomationElement, CUIAutomation, TreeScope_Descendants,
+    IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker, CUIAutomation,
+    TreeScope_Descendants, UIA_MenuControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
 
@@ -88,6 +89,14 @@ pub fn scan_foreground_window(max_elements: usize) -> Result<Vec<ScannedElement>
             .context("ElementFromHandle")?
     };
 
+    let firefox_menu_walker = unsafe {
+        if root.CurrentClassName().is_ok_and(|class| class.to_string() == "MozillaWindowClass") {
+            automation.RawViewWalker().ok()
+        } else {
+            None
+        }
+    };
+
     let condition = unsafe {
         automation
             .CreateTrueCondition()
@@ -112,6 +121,12 @@ pub fn scan_foreground_window(max_elements: usize) -> Result<Vec<ScannedElement>
             Err(_) => continue,
         };
         if let Some(scanned) = try_element(&el, hwnd)? {
+            if firefox_menu_walker
+                .as_ref()
+                .is_some_and(|walker| belongs_to_hidden_menu(walker, &el))
+            {
+                continue;
+            }
             candidates.push(scanned);
         }
     }
@@ -127,6 +142,21 @@ pub fn scan_foreground_window(max_elements: usize) -> Result<Vec<ScannedElement>
     });
     candidates.truncate(max_elements);
     Ok(candidates)
+}
+
+fn belongs_to_hidden_menu(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+) -> bool {
+    // Firefox can report closed popup children as visible at their old bounds.
+    // The menu itself reports the popup's visibility correctly.
+    unsafe {
+        let Ok(parent) = walker.GetParentElement(element) else {
+            return false;
+        };
+        parent.CurrentControlType().is_ok_and(|kind| kind == UIA_MenuControlTypeId)
+            && parent.CurrentIsOffscreen().is_ok_and(|flag| flag.as_bool())
+    }
 }
 
 fn try_element(element: &IUIAutomationElement, target_hwnd: HWND) -> Result<Option<ScannedElement>> {

@@ -12,6 +12,7 @@ pub const MOD_WIN: u32 = 0x8;
 pub const DEFAULT_ALPHABET: &str = "qwertasdfgzxcvb";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     #[serde(default = "default_hotkey_modifiers")]
     pub hint_hotkey_modifiers: u32,
@@ -23,6 +24,13 @@ pub struct Config {
     pub font_size: i32,
     #[serde(default = "default_badge_bg")]
     pub badge_bg_color: u32,
+    pub right_badge_bg_color: u32,
+    pub right_badge_text_color: u32,
+    pub switch_mode_vk: u32,
+    pub left_click_vk: u32,
+    pub right_click_vk: u32,
+    pub cancel_vk: u32,
+    pub erase_vk: u32,
     #[serde(default = "default_badge_text")]
     pub badge_text_color: u32,
     #[serde(default = "default_max_elements")]
@@ -65,6 +73,13 @@ impl Default for Config {
             hint_alphabet: default_hint_alphabet(),
             font_size: default_font_size(),
             badge_bg_color: default_badge_bg(),
+            right_badge_bg_color: 0x008D437E,
+            right_badge_text_color: default_badge_text(),
+            switch_mode_vk: 0x09,
+            left_click_vk: 0x31,
+            right_click_vk: 0x32,
+            cancel_vk: 0x1B,
+            erase_vk: 0x08,
             badge_text_color: default_badge_text(),
             max_elements: default_max_elements(),
         }
@@ -105,7 +120,19 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.parse_alphabet()?;
+        let alphabet = self.parse_alphabet()?;
+        let mut seen = HashSet::new();
+        for vk in self.hint_keys() {
+            if !supported_hint_keys().contains(&vk) {
+                bail!("Unsupported hint shortcut: {}", vk_display_name(vk));
+            }
+            if !seen.insert(vk) {
+                bail!("{} is assigned to multiple hint shortcuts", vk_display_name(vk));
+            }
+            if alphabet.iter().any(|c| c.to_ascii_uppercase() as u32 == vk) {
+                bail!("{} is already used in the hint alphabet", vk_display_name(vk));
+            }
+        }
         self.validate_hotkey()?;
         if self.font_size < 8 || self.font_size > 32 {
             bail!("font_size must be between 8 and 32");
@@ -114,6 +141,10 @@ impl Config {
             bail!("max_elements must be between 10 and 2000");
         }
         Ok(())
+    }
+
+    pub fn hint_keys(&self) -> [u32; 5] {
+        [self.switch_mode_vk, self.left_click_vk, self.right_click_vk, self.cancel_vk, self.erase_vk]
     }
 
     pub fn parse_alphabet(&self) -> Result<Vec<char>> {
@@ -227,6 +258,23 @@ pub fn is_modifier_vk(vk: u32) -> bool {
     )
 }
 
+fn supported_hint_keys() -> Vec<u32> {
+    [0x08, 0x09, 0x0D, 0x1B, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E]
+        .into_iter()
+        .chain(0x30..=0x39)
+        .chain(0x41..=0x5A)
+        .chain(0x60..=0x69)
+        .chain(0x70..=0x87)
+        .collect()
+}
+
+pub fn parse_hint_key(text: &str) -> Result<u32> {
+    supported_hint_keys()
+        .into_iter()
+        .find(|&vk| vk_display_name(vk).eq_ignore_ascii_case(text.trim()))
+        .with_context(|| format!("Unknown key '{}'", text.trim()))
+}
+
 pub fn vk_display_name(vk: u32) -> String {
     match vk {
         0x08 => "Backspace".into(),
@@ -271,6 +319,25 @@ pub fn rgba_to_bgr(rgba: [f32; 4]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_config_gets_default_bindings_and_keeps_its_palette() {
+        let config: Config = toml::from_str("badge_bg_color = 123").unwrap();
+        assert_eq!(config.badge_bg_color, 123);
+        assert_eq!(config.switch_mode_vk, 0x09);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn shortcut_validation_rejects_duplicates_and_hint_letters() {
+        let mut config = Config::default();
+        config.switch_mode_vk = config.left_click_vk;
+        assert!(config.validate().is_err());
+        config.switch_mode_vk = parse_hint_key("q").unwrap();
+        assert!(config.validate().is_err());
+        config.switch_mode_vk = parse_hint_key("F8").unwrap();
+        assert!(config.validate().is_ok());
+    }
 
     #[test]
     fn parse_default_alphabet() {

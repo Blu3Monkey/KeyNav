@@ -13,7 +13,7 @@ use hotkey::{is_hotkey_message, HotkeyRegistration};
 use overlay::OverlayWindow;
 use settings::{is_open, open_dialog, settings_hwnd};
 use std::env;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
@@ -25,13 +25,13 @@ use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_1, VK_2, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE,
     IsDialogMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetWindowsHookExW, TranslateMessage,
     CS_HREDRAW, CS_VREDRAW, HHOOK, KBDLLHOOKSTRUCT, MB_OK, MSG, WH_KEYBOARD_LL, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WNDCLASSW,
+    WINDOW_STYLE, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
 };
 
 const MSG_CLASS: PCWSTR = windows::core::w!("KeyNavMessage");
@@ -44,6 +44,8 @@ const WM_KEYNAV_OPEN_SETTINGS: u32 = WM_APP + 6;
 
 static MESSAGE_HWND: AtomicIsize = AtomicIsize::new(0);
 static HINT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static HINT_KEYS: AtomicU64 = AtomicU64::new(0);
+static SWITCH_DOWN: AtomicU32 = AtomicU32::new(0);
 static HOTKEY_VK: AtomicU32 = AtomicU32::new(0x20);
 static HOTKEY_MODS: AtomicU32 = AtomicU32::new(0x6);
 
@@ -193,6 +195,11 @@ pub(crate) fn apply_config(ctx: &mut AppContext, config: Config) -> Result<Optio
 }
 
 fn update_hotkey_atomics(config: &Config) {
+    let mut keys = 0;
+    for (index, vk) in config.hint_keys().into_iter().enumerate() {
+        keys |= u64::from(vk) << (index * 8);
+    }
+    HINT_KEYS.store(keys, Ordering::SeqCst);
     HOTKEY_VK.store(config.hint_hotkey_vk, Ordering::SeqCst);
     HOTKEY_MODS.store(config.hint_hotkey_modifiers & 0x0F, Ordering::SeqCst);
 }
@@ -232,7 +239,7 @@ fn start_hint_mode(ctx: &mut AppContext) {
     ctx.matcher.clear();
     ctx.state = AppState::HintMode;
 
-    if let Err(e) = ctx.overlay.show_hints(&ctx.targets, "") {
+    if let Err(e) = ctx.overlay.show_hints(&ctx.targets, "", ctx.click_button) {
         log::warn!("overlay failed: {e:#}");
         ctx.state = AppState::Idle;
         return;
@@ -246,21 +253,30 @@ fn handle_key(ctx: &mut AppContext, vk: u32) {
         return;
     }
 
-    if vk == VK_ESCAPE.0 as u32 {
+    if vk == ctx.config.cancel_vk {
         finish_hint_mode(ctx);
         return;
     }
-    if vk == VK_1.0 as u32 {
-        ctx.click_button = Some(ClickButton::Left);
+    if vk == ctx.config.switch_mode_vk {
+        ctx.click_button = match ctx.click_button {
+            Some(ClickButton::Right) => None,
+            _ => Some(ClickButton::Right),
+        };
+        redraw_hints(ctx);
         return;
     }
-    if vk == VK_2.0 as u32 {
-        ctx.click_button = Some(ClickButton::Right);
+    if vk == ctx.config.left_click_vk || vk == ctx.config.right_click_vk {
+        ctx.click_button = Some(if vk == ctx.config.left_click_vk {
+            ClickButton::Left
+        } else {
+            ClickButton::Right
+        });
+        redraw_hints(ctx);
         return;
     }
-    if vk == VK_BACK.0 as u32 {
+    if vk == ctx.config.erase_vk {
         ctx.matcher.pop_char();
-        let _ = ctx.overlay.show_hints(&ctx.targets, ctx.matcher.prefix());
+        redraw_hints(ctx);
         return;
     }
     if (0x41..=0x5A).contains(&vk) {
@@ -268,7 +284,7 @@ fn handle_key(ctx: &mut AppContext, vk: u32) {
         ctx.matcher.push_char(ch);
         match ctx.matcher.evaluate_against(&ctx.targets) {
             MatchResult::Partial => {
-                let _ = ctx.overlay.show_hints(&ctx.targets, ctx.matcher.prefix());
+                redraw_hints(ctx);
             }
             MatchResult::Unique(target) => {
                 let click_button = ctx.click_button;
@@ -281,6 +297,12 @@ fn handle_key(ctx: &mut AppContext, vk: u32) {
                 ctx.matcher.pop_char();
             }
         }
+    }
+}
+
+fn redraw_hints(ctx: &AppContext) {
+    if let Err(e) = ctx.overlay.show_hints(&ctx.targets, ctx.matcher.prefix(), ctx.click_button) {
+        log::warn!("redraw hints failed: {e:#}");
     }
 }
 
@@ -330,20 +352,26 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
-    let is_keydown = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
-    if !is_keydown {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
     let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
     let vk = kb.vkCode;
+    if matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP)
+        && SWITCH_DOWN.compare_exchange(vk, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    {
+        return LRESULT(1);
+    }
+    if !matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+    if SWITCH_DOWN.load(Ordering::SeqCst) == vk {
+        return LRESULT(1);
+    }
 
     if HINT_ACTIVE.load(Ordering::SeqCst) {
-        let interesting = vk == VK_ESCAPE.0 as u32
-            || vk == VK_BACK.0 as u32
-            || vk == VK_1.0 as u32
-            || vk == VK_2.0 as u32
-            || (0x41..=0x5A).contains(&vk);
+        let keys = HINT_KEYS.load(Ordering::SeqCst).to_le_bytes();
+        let interesting = keys[..5].contains(&(vk as u8)) || (0x41..=0x5A).contains(&vk);
+        if vk == u32::from(keys[0]) {
+            SWITCH_DOWN.store(vk, Ordering::SeqCst);
+        }
         if interesting {
             post_to_main(WM_KEYNAV_KEY, vk);
             return LRESULT(1);
